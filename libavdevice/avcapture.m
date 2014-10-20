@@ -489,9 +489,6 @@ static int avf_read_header(AVFormatContext *s)
     }
     video_device = input;
 
-    // Initialize capture session
-    ctx->capture_session = [[AVCaptureSession alloc] init];
-
     if (video_device && add_video_device(s, video_device)) {
         goto fail;
     }
