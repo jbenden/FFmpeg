@@ -25,7 +25,9 @@
  * @author Thilo Borgmann <thilo.borgmann@mail.de>
  */
 
+#import <Foundation/Foundation.h>
 #import <AVFoundation/AVFoundation.h>
+
 #include <pthread.h>
 
 #include "libavutil/pixdesc.h"
@@ -92,6 +94,7 @@ typedef struct
 
     int             list_devices;
     int             video_device_index;
+    int             video_screen_index;
     int             video_stream_index;
     int             audio_device_index;
     int             audio_stream_index;
@@ -535,6 +538,33 @@ static int avf_read_header(AVFormatContext *s)
             int index  = [devices indexOfObject:device];
             av_log(ctx, AV_LOG_INFO, "[%d] %s\n", index, name);
         }
+        av_log(ctx, AV_LOG_INFO, "AVFoundation screen devices:\n");
+#define MAX_DISPLAYS 32
+      av_log(ctx, AV_LOG_INFO, "AVFoundation video devices:\n");
+      CGDirectDisplayID displays[MAX_DISPLAYS];
+      uint32_t numDisplays;
+      uint32_t i;
+      CGGetActiveDisplayList(MAX_DISPLAYS, displays, &numDisplays);
+      for(i=0; i<numDisplays; i++) {
+          CGDisplayModeRef mode;
+          CFIndex index, count;
+          CFArrayRef modeList;
+          modeList=CGDisplayCopyAllDisplayModes(displays[i], NULL);
+          count=CFArrayGetCount(modeList);
+          NSLog(@"\n\nmode --");
+          for(index=0;index<count;index++) {
+              mode=(CGDisplayModeRef)CFArrayGetValueAtIndex(modeList, index);
+              long h=0, w=0;
+              h=CGDisplayModeGetHeight(mode);
+              w=CGDisplayModeGetWidth(mode);
+              uint32_t flags=CGDisplayModeGetIOFlags(mode);
+              NSLog(@"index: %ld flags: %d", index, flags);
+              NSLog(@"w, h: %ld, %ld", w, h);
+              //test mode here against required params and set, using:
+              //CGDisplaySetDisplayMode(displays[i], mode, NULL);
+            }
+          CFRelease(modeList);
+        }
         av_log(ctx, AV_LOG_INFO, "AVFoundation audio devices:\n");
         devices = [AVCaptureDevice devicesWithMediaType:AVMediaTypeAudio];
         for (AVCaptureDevice *device in devices) {
@@ -560,7 +590,7 @@ static int avf_read_header(AVFormatContext *s)
         sscanf(ctx->audio_filename, "%d", &ctx->audio_device_index);
     }
 
-    if (ctx->video_device_index >= 0) {
+    if (ctx->video_screen_index == -1 && ctx->video_device_index >= 0) {
         NSArray *devices = [AVCaptureDevice devicesWithMediaType:AVMediaTypeVideo];
 
         if (ctx->video_device_index >= [devices count]) {
@@ -569,7 +599,7 @@ static int avf_read_header(AVFormatContext *s)
         }
 
         video_device = [devices objectAtIndex:ctx->video_device_index];
-    } else if (ctx->video_filename &&
+    } else if (ctx->video_screen_index == -1 && ctx->video_filename &&
                strncmp(ctx->video_filename, "default", 7)) {
         NSArray *devices = [AVCaptureDevice devicesWithMediaType:AVMediaTypeVideo];
 
@@ -584,8 +614,30 @@ static int avf_read_header(AVFormatContext *s)
             av_log(ctx, AV_LOG_ERROR, "Video device not found\n");
             goto fail;
         }
-    } else {
-        video_device = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
+    }
+    CGDirectDisplayID displayId = kCGDirectMainDisplay;
+    if (ctx->video_screen_index != -1)
+        ctx->video_screen_index = ctx->video_device_index;
+    av_log(ctx, AV_LOG_INFO, "Using display index %d.\n", ctx->video_screen_index);
+    av_log(ctx, AV_LOG_INFO, "Using audio index %d.\n", ctx->audio_device_index);
+    if (ctx->video_screen_index >= 0) {
+        CGDirectDisplayID displays[MAX_DISPLAYS];
+        uint32_t numDisplays;
+        CGGetActiveDisplayList(MAX_DISPLAYS, displays, &numDisplays);
+
+        if (ctx->video_screen_index >= numDisplays) {
+            av_log(ctx, AV_LOG_ERROR, "Invalid device index.\n");
+            goto fail;
+        }
+
+        displayId = displays[ctx->video_screen_index];
+
+        AVCaptureScreenInput *input = [[[AVCaptureScreenInput alloc] initWithDisplayID:displayId] autorelease];
+        if (!input) {
+            [ctx->capture_session release];
+            goto fail;
+        }
+        video_device = (AVCaptureDevice *) input;
     }
 
     // get audio device
@@ -632,6 +684,10 @@ static int avf_read_header(AVFormatContext *s)
 
     // Initialize capture session
     ctx->capture_session = [[AVCaptureSession alloc] init];
+
+    if (ctx->video_screen_index >= 0) {
+        ctx->capture_session.sessionPreset = AVCaptureSessionPresetiFrame1280x720;
+    }
 
     if (video_device && add_video_device(s, video_device)) {
         goto fail;
@@ -776,6 +832,7 @@ static const AVOption options[] = {
     { "true", "", 0, AV_OPT_TYPE_CONST, {.i64=1}, 0, 0, AV_OPT_FLAG_DECODING_PARAM, "list_devices" },
     { "false", "", 0, AV_OPT_TYPE_CONST, {.i64=0}, 0, 0, AV_OPT_FLAG_DECODING_PARAM, "list_devices" },
     { "video_device_index", "select video device by index for devices with same name (starts at 0)", offsetof(AVFContext, video_device_index), AV_OPT_TYPE_INT, {.i64 = -1}, -1, INT_MAX, AV_OPT_FLAG_DECODING_PARAM },
+    { "video_screen_index", "select screen device by index for devices with same name (starts at 0)", offsetof(AVFContext, video_screen_index), AV_OPT_TYPE_INT, {.i64 = -1}, -1, INT_MAX, AV_OPT_FLAG_DECODING_PARAM },
     { "audio_device_index", "select audio device by index for devices with same name (starts at 0)", offsetof(AVFContext, audio_device_index), AV_OPT_TYPE_INT, {.i64 = -1}, -1, INT_MAX, AV_OPT_FLAG_DECODING_PARAM },
     { "pixel_format", "set pixel format", offsetof(AVFContext, pixel_format), AV_OPT_TYPE_PIXEL_FMT, {.i64 = AV_PIX_FMT_YUV420P}, 0, INT_MAX, AV_OPT_FLAG_DECODING_PARAM},
     { NULL },
